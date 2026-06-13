@@ -119,7 +119,7 @@ def create_question():
         explanation=data.get("explanation"),
         image_url=data.get("image_url"),
         topic_tag=data.get("topic_tag"),
-        keywords=data.get("keywords"),  # ← keyword grading
+        keywords=data.get("keywords"),
         created_by=user.id,
     )
     db.session.add(question)
@@ -157,7 +157,7 @@ def update_question(question_id):
 
     data = request.get_json() or {}
     for f in ("text", "question_type", "difficulty", "explanation",
-              "image_url", "topic_tag", "keywords"):  # ← keywords included
+              "image_url", "topic_tag", "keywords"):
         if f in data:
             setattr(q, f, data[f])
 
@@ -389,6 +389,16 @@ def start_attempt(exam_id):
     if exam.end_time and now > exam.end_time:
         return error("Exam has ended.", 400)
 
+    # SECURITY: Check for any completed/submitted attempt
+    completed_attempt = ExamAttempt.query.filter(
+        ExamAttempt.exam_id == exam_id,
+        ExamAttempt.student_id == user.id,
+        ExamAttempt.status.in_(["graded", "submitted"])
+    ).first()
+    
+    if completed_attempt:
+        return error("You have already completed this exam. Cannot start new attempt.", 400)
+
     previous_count = ExamAttempt.query.filter_by(
         exam_id=exam_id, student_id=user.id
     ).count()
@@ -424,8 +434,9 @@ def submit_answer(exam_id, attempt_id):
         id=attempt_id, exam_id=exam_id, student_id=user.id
     ).first_or_404()
 
+    # SECURITY: Prevent answers after submission
     if attempt.status != "in_progress":
-        return error("Attempt is not in progress.", 400)
+        return error("Exam already submitted. Cannot save answers.", 400)
 
     data = request.get_json() or {}
     question_id = data.get("question_id")
@@ -472,8 +483,9 @@ def submit_attempt(exam_id, attempt_id):
         id=attempt_id, exam_id=exam_id, student_id=user.id
     ).first_or_404()
 
+    # SECURITY: Prevent double submission
     if attempt.status != "in_progress":
-        return error("Attempt is not in progress.", 400)
+        return error("Exam already submitted.", 400)
 
     now = datetime.now(timezone.utc)
     attempt.submitted_at = now
@@ -587,6 +599,7 @@ def list_attempts(exam_id):
     return paginate(query, attempts_schema)
 
 
+# GET - View specific attempt
 @exams_bp.get("/<int:exam_id>/attempts/<int:attempt_id>")
 @jwt_required()
 def get_attempt(exam_id, attempt_id):
@@ -608,6 +621,29 @@ def get_attempt(exam_id, attempt_id):
         result["answers"] = answers_schema.dump(attempt.answers)
 
     return success(result)
+
+
+# DELETE - Delete specific attempt (separate route)
+@exams_bp.delete("/<int:exam_id>/attempts/<int:attempt_id>/delete")
+@jwt_required()
+@roles_required("instructor", "admin")
+def delete_attempt(exam_id, attempt_id):
+    user = get_current_user()
+    if not user:
+        return error("Unauthorized.", 401)
+    
+    attempt = ExamAttempt.query.filter_by(
+        id=attempt_id, exam_id=exam_id
+    ).first_or_404()
+    
+    # Delete answers first (child records)
+    AttemptAnswer.query.filter_by(attempt_id=attempt_id).delete()
+    
+    # Then delete the attempt
+    db.session.delete(attempt)
+    db.session.commit()
+    
+    return success(message="Attempt deleted successfully")
 
 
 @exams_bp.patch("/<int:exam_id>/attempts/<int:attempt_id>/grade")
